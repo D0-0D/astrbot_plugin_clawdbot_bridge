@@ -208,35 +208,6 @@ class ClawdbotBridge(Star):
         )
         return is_study
 
-    def _resolve_event(self, event: object, args: tuple) -> AstrMessageEvent | None:
-        """兼容不同 AstrBot 版本的回调参数绑定方式"""
-        if isinstance(event, AstrMessageEvent):
-            return event
-        if hasattr(event, "get_sender_id") and hasattr(event, "get_message_type"):
-            return event  # type: ignore[return-value]
-
-        for arg in args:
-            if isinstance(arg, AstrMessageEvent):
-                return arg
-            if hasattr(arg, "get_sender_id") and hasattr(arg, "get_message_type"):
-                return arg  # type: ignore[return-value]
-        return None
-
-    @staticmethod
-    def _get_message_text(event: AstrMessageEvent) -> str:
-        """安全获取消息文本，兼容不同事件实现"""
-        text = getattr(event, "message_str", "")
-        if isinstance(text, str) and text.strip():
-            return text.strip()
-
-        getter = getattr(event, "get_message_str", None)
-        if callable(getter):
-            got = getter()
-            if isinstance(got, str):
-                return got.strip()
-
-        return ""
-
     def _stop_event(self, event: AstrMessageEvent) -> None:
         """停止事件传播并禁止 LLM 调用"""
         event.stop_event()
@@ -253,7 +224,7 @@ class ClawdbotBridge(Star):
             logger.info(f"[clawdbot_bridge] 学习群响应，私信管理员 {self.admin_qq_id}")
             group_id = str(event.group_id) if hasattr(event, "group_id") else "未知"
             sender_id = event.get_sender_id()
-            message = self._get_message_text(event)
+            message = event.message_str.strip()
 
             admin_message = f"[学习群 OpenClaw]\n群号: {group_id}\n发送者: {sender_id}\n原消息: {message[:100]}\n\n{response_text}"
             try:
@@ -273,17 +244,7 @@ class ClawdbotBridge(Star):
     @filter.event_message_type(EventMessageType.ALL, priority=sys.maxsize)
     async def handle_message(self, event: AstrMessageEvent, *args, **kwargs):
         """处理所有消息"""
-        event = self._resolve_event(event, args)
-        if event is None:
-            logger.error(
-                f"[clawdbot_bridge] 无法解析事件对象: event={type(event)}, args={[type(a) for a in args]}"
-            )
-            return
-
-        raw_message = self._get_message_text(event)
-        if not raw_message:
-            logger.debug("[clawdbot_bridge] 收到空消息，忽略")
-            return
+        raw_message = event.message_str.strip()
         logger.info(
             f"[clawdbot_bridge] 收到消息: '{raw_message[:100]}' from sender_id={event.get_sender_id()}"
         )

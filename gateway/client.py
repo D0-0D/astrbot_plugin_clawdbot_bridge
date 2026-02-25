@@ -47,11 +47,51 @@ class OpenClawClient:
             "x-openclaw-agent-id": self.agent_id,
             "x-openclaw-session-key": session_key,
         }
+        normalized_token = self._normalize_bearer_token(self.auth_token)
         if self.auth_token:
-            headers["Authorization"] = f"Bearer {self.auth_token}"
-            headers["x-openclaw-auth-token"] = self.auth_token
-            headers["x-api-key"] = self.auth_token
+            headers["Authorization"] = f"Bearer {normalized_token}"
+            headers["x-openclaw-auth-token"] = normalized_token
+            headers["x-api-key"] = normalized_token
         return headers
+
+    @staticmethod
+    def _normalize_bearer_token(token: str) -> str:
+        """将可能带 Bearer 前缀的 token 规范化为纯 token"""
+        value = (token or "").strip()
+        if value.lower().startswith("bearer "):
+            return value[7:].strip()
+        return value
+
+    def _build_auth_variants(self, base_headers: dict[str, str]) -> list[tuple[str, dict[str, str]]]:
+        """构建鉴权头的多种兼容方案（按优先级）"""
+        if not self.auth_token:
+            return [("none", base_headers)]
+
+        raw_token = self.auth_token
+        normalized_token = self._normalize_bearer_token(raw_token)
+
+        variants: list[tuple[str, dict[str, str]]] = []
+
+        headers_bearer = dict(base_headers)
+        headers_bearer["Authorization"] = f"Bearer {normalized_token}"
+        headers_bearer["x-openclaw-auth-token"] = normalized_token
+        headers_bearer["x-api-key"] = normalized_token
+        variants.append(("bearer", headers_bearer))
+
+        if raw_token != normalized_token:
+            headers_raw_auth = dict(base_headers)
+            headers_raw_auth["Authorization"] = raw_token
+            headers_raw_auth["x-openclaw-auth-token"] = normalized_token
+            headers_raw_auth["x-api-key"] = normalized_token
+            variants.append(("raw-authorization", headers_raw_auth))
+
+        headers_token_only = dict(base_headers)
+        headers_token_only.pop("Authorization", None)
+        headers_token_only["x-openclaw-auth-token"] = normalized_token
+        headers_token_only["x-api-key"] = normalized_token
+        variants.append(("token-headers-only", headers_token_only))
+
+        return variants
 
     def _build_payload(
         self, message: str, session_key: str, stream: bool = True
@@ -82,7 +122,8 @@ class OpenClawClient:
             return "❌ 消息不能为空"
 
         url = f"{self.gateway_url}/v1/chat/completions"
-        headers = self._build_headers(session_key)
+        base_headers = self._build_headers(session_key)
+        auth_variants = self._build_auth_variants(base_headers)
         payload = self._build_payload(message, session_key, stream=True)
 
         logger.info(f"[OpenClawClient] 📤 发送请求: {url}")
@@ -95,13 +136,29 @@ class OpenClawClient:
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=self.timeout),
-                ) as response:
-                    return await self._handle_response(response)
+                last_401_text = ""
+                for index, (variant_name, headers) in enumerate(auth_variants):
+                    logger.debug(
+                        f"[OpenClawClient] 尝试鉴权方案: {variant_name} ({index + 1}/{len(auth_variants)})"
+                    )
+                    async with session.post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=self.timeout),
+                    ) as response:
+                        if response.status == 401 and index < len(auth_variants) - 1:
+                            last_401_text = await response.text()
+                            logger.warning(
+                                f"[OpenClawClient] 鉴权方案 {variant_name} 返回 401，尝试下一个方案"
+                            )
+                            continue
+                        if response.status == 401:
+                            last_401_text = await response.text()
+                            return self._build_auth_failure_message(last_401_text)
+                        return await self._handle_response(response)
+
+                return self._build_auth_failure_message(last_401_text)
 
         except asyncio.TimeoutError:
             logger.error(f"[OpenClawClient] 请求超时 ({self.timeout}s)")
@@ -112,6 +169,22 @@ class OpenClawClient:
         except Exception as e:
             logger.error(f"[OpenClawClient] 未知错误: {e}", exc_info=True)
             return f"❌ 发生错误: {str(e)}"
+
+    def _build_auth_failure_message(self, error_text: str) -> str:
+        """构建统一的认证失败提示"""
+        token_status = "已配置" if self.auth_token else "未配置"
+        detail = f"，网关返回: {error_text[:120]}" if error_text else ""
+        logger.error(
+            f"[OpenClawClient] 认证失败 (token={token_status}) - {error_text[:200]}"
+        )
+        return (
+            "❌ Gateway 认证失败（401）\n"
+            f"- 当前 token: {token_status}\n"
+            "- 已自动尝试 Bearer / 原始 Authorization / x-api-key 兼容方案\n"
+            "- 请确认 gateway_auth_token 与网关 gateway.auth.token 完全一致\n"
+            "- 如 AstrBot 在 Docker 中，确认读取的是容器内最新插件配置"
+            f"{detail}"
+        )
 
     async def probe_gateway(self, timeout: int = 5) -> dict[str, Any]:
         """探测 Gateway 连通性
@@ -163,18 +236,7 @@ class OpenClawClient:
                 return await self._handle_json_response(response)
         elif response.status == 401:
             error_text = await response.text()
-            token_status = "已配置" if self.auth_token else "未配置"
-            detail = f"，网关返回: {error_text[:120]}" if error_text else ""
-            logger.error(
-                f"[OpenClawClient] 认证失败 (token={token_status}) - {error_text[:200]}"
-            )
-            return (
-                "❌ Gateway 认证失败（401）\n"
-                f"- 当前 token: {token_status}\n"
-                "- 请确认 gateway_auth_token 与网关 gateway.auth.token 完全一致\n"
-                "- 如 AstrBot 在 Docker 中，确认读取的是容器内最新插件配置"
-                f"{detail}"
-            )
+            return self._build_auth_failure_message(error_text)
         elif response.status == 404:
             logger.error(f"[OpenClawClient] Agent {self.agent_id} 不存在")
             return f"❌ Agent {self.agent_id} 不存在或未启用"
