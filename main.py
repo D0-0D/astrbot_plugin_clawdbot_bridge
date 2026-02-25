@@ -197,7 +197,7 @@ class ClawdbotBridge(Star):
 
     def _is_study_group(self, event: AstrMessageEvent) -> bool:
         """检查是否为学习群"""
-        if event.message_type != EventMessageType.GROUP_MESSAGE:
+        if event.get_message_type() != EventMessageType.GROUP_MESSAGE:
             return False
         group_id = str(event.group_id) if hasattr(event, "group_id") else ""
         is_study = group_id in self.study_groups
