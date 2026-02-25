@@ -54,10 +54,10 @@ class OpenClawClient:
     def _build_payload(
         self, message: str, session_key: str, stream: bool = True
     ) -> dict[str, Any]:
-        """构建请求体"""
+        """构建兼容 OpenAI /v1/chat/completions 的请求体"""
         return {
             "model": f"openclaw:{self.agent_id}",
-            "input": message,
+            "messages": [{"role": "user", "content": message}],
             "user": session_key,
             "stream": stream,
         }
@@ -79,7 +79,7 @@ class OpenClawClient:
             logger.warning("[OpenClawClient] 消息为空，拒绝发送")
             return "❌ 消息不能为空"
 
-        url = f"{self.gateway_url}/v1/responses"
+        url = f"{self.gateway_url}/v1/chat/completions"
         headers = self._build_headers(session_key)
         payload = self._build_payload(message, session_key, stream=True)
 
@@ -167,97 +167,39 @@ class OpenClawClient:
             logger.error(f"[OpenClawClient] API 错误: {response.status} - {error_text}")
             return f"❌ Gateway 错误 ({response.status}): {error_text[:200]}"
 
-    async def _handle_sse_response(
-        self, response: aiohttp.ClientResponse
-    ) -> str | None:
-        """处理 SSE 流式响应"""
-        logger.info("[OpenClawClient] 🔄 处理 SSE 流式响应")
-
+    async def _handle_sse_response(self, response: aiohttp.ClientResponse) -> str | None:
+        """核心修改点 2: 重新实现标准 OpenAI SSE 流解析器"""
+        logger.info("[OpenClawClient] 🔄 处理 OpenAI SSE 流式响应")
         accumulated_text = ""
-        final_response_text = ""
-        buffer = ""
-        event_count = 0
 
         async for chunk in response.content.iter_any():
             if not chunk:
                 continue
-
             chunk_str = chunk.decode("utf-8", errors="ignore")
-            buffer += chunk_str
-
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
+            
+            for line in chunk_str.split("\n"):
                 line = line.strip()
-
                 if not line or line.startswith("event:"):
                     continue
-
                 if line == "data: [DONE]":
-                    logger.info("[OpenClawClient] 收到 SSE 结束标记")
                     break
-
                 if line.startswith("data: "):
                     try:
                         data = json.loads(line[6:])
-                        event_count += 1
-
-                        result = self.parser.parse_sse_event(data)
-                        logger.debug(
-                            f"[OpenClawClient] SSE 事件 #{event_count}: {result['type']}"
-                        )
-
-                        if result["is_error"]:
-                            return f"❌ OpenClaw 错误: {result['error_message']}"
-
-                        if result["text"]:
-                            if result["type"] == "response.output_text.delta":
-                                accumulated_text += result["text"]
-                            elif result["type"] == "response.completed":
-                                final_response_text = result["text"]
-                            elif result["type"] == "response.output_text.done":
-                                if len(result["text"]) >= len(accumulated_text):
-                                    accumulated_text = result["text"]
-
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"[OpenClawClient] 解析 SSE 失败: {e}")
+                        if "choices" in data and len(data["choices"]) > 0:
+                            delta = data["choices"][0].get("delta", {})
+                            if "content" in delta:
+                                accumulated_text += delta["content"]
+                    except json.JSONDecodeError:
                         continue
 
-        logger.info(
-            f"[OpenClawClient] SSE 完成: 事件数={event_count}, 累计={len(accumulated_text)}, 最终={len(final_response_text)}"
-        )
+        if accumulated_text:
+            logger.info(f"[OpenClawClient] ✅ 成功获取响应 (长度: {len(accumulated_text)})")
+            return accumulated_text
+        return "✅ 命令已执行完成（无文本输出）"
 
-        # 优先使用 response.completed 中的最终文本
-        result_text = final_response_text if final_response_text else accumulated_text
-
-        if result_text:
-            logger.info(f"[OpenClawClient] ✅ 成功获取响应 (长度: {len(result_text)})")
-            return result_text
-        else:
-            logger.warning("[OpenClawClient] ⚠️ 未收集到文本内容")
-            return "✅ 命令已执行完成（无文本输出）"
-
-    async def _handle_json_response(
-        self, response: aiohttp.ClientResponse
-    ) -> str | None:
-        """处理非流式 JSON 响应"""
-        logger.info("[OpenClawClient] 📋 处理 JSON 响应")
-
+    async def _handle_json_response(self, response: aiohttp.ClientResponse) -> str | None:
         result = await response.json()
-        logger.debug(
-            f"[OpenClawClient] 响应: {json.dumps(result, ensure_ascii=False)[:500]}"
-        )
-
-        text = self.parser.parse_json_response(result)
-
-        if text:
-            logger.info(f"[OpenClawClient] ✅ 成功获取响应 (长度: {len(text)})")
-            return text
-
-        # 如果响应状态是 completed，即使没有文本也返回提示
-        if result.get("status") == "completed":
-            return "✅ 命令已执行完成"
-
-        logger.warning(
-            f"[OpenClawClient] ⚠️ 未知响应格式: {json.dumps(result, ensure_ascii=False)[:200]}"
-        )
-        return None
+        if "choices" in result and len(result["choices"]) > 0:
+            return result["choices"][0].get("message", {}).get("content", "")
+        return "✅ 请求已接收"
