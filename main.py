@@ -98,7 +98,9 @@ class ClawdbotBridge(Star):
         )
         session_key = self.session_manager.get_session_key(session_id)
         message_type = (
-            "群聊" if event.message_type == EventMessageType.GROUP_MESSAGE else "私聊"
+            "群聊"
+            if event.get_message_type() == EventMessageType.GROUP_MESSAGE
+            else "私聊"
         )
         mode_text = "OpenClaw" if is_in_clawdbot else "AstrBot"
         shared_text = "是" if self.share_with_webui else "否"
