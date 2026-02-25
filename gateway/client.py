@@ -36,7 +36,7 @@ class OpenClawClient:
         """
         self.gateway_url = gateway_url.rstrip("/")
         self.agent_id = agent_id
-        self.auth_token = auth_token
+        self.auth_token = (auth_token or "").strip()
         self.timeout = timeout
         self.parser = ResponseParser()
 
@@ -49,6 +49,8 @@ class OpenClawClient:
         }
         if self.auth_token:
             headers["Authorization"] = f"Bearer {self.auth_token}"
+            headers["x-openclaw-auth-token"] = self.auth_token
+            headers["x-api-key"] = self.auth_token
         return headers
 
     def _build_payload(
@@ -84,6 +86,9 @@ class OpenClawClient:
         payload = self._build_payload(message, session_key, stream=True)
 
         logger.info(f"[OpenClawClient] 📤 发送请求: {url}")
+        logger.debug(
+            f"[OpenClawClient] 鉴权状态: token={'已配置' if bool(self.auth_token) else '未配置'}"
+        )
         logger.debug(
             f"[OpenClawClient] 请求体: {json.dumps(payload, ensure_ascii=False)}"
         )
@@ -157,8 +162,19 @@ class OpenClawClient:
             else:
                 return await self._handle_json_response(response)
         elif response.status == 401:
-            logger.error("[OpenClawClient] 认证失败")
-            return "❌ Gateway 认证失败，请检查配置"
+            error_text = await response.text()
+            token_status = "已配置" if self.auth_token else "未配置"
+            detail = f"，网关返回: {error_text[:120]}" if error_text else ""
+            logger.error(
+                f"[OpenClawClient] 认证失败 (token={token_status}) - {error_text[:200]}"
+            )
+            return (
+                "❌ Gateway 认证失败（401）\n"
+                f"- 当前 token: {token_status}\n"
+                "- 请确认 gateway_auth_token 与网关 gateway.auth.token 完全一致\n"
+                "- 如 AstrBot 在 Docker 中，确认读取的是容器内最新插件配置"
+                f"{detail}"
+            )
         elif response.status == 404:
             logger.error(f"[OpenClawClient] Agent {self.agent_id} 不存在")
             return f"❌ Agent {self.agent_id} 不存在或未启用"
