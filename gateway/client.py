@@ -102,7 +102,7 @@ class OpenClawClient:
         """构建兼容 OpenAI /v1/chat/completions 的请求体"""
         return {
             "model": f"openclaw:{self.agent_id}",
-            "messages": [{"role": "user", "content": message}],
+            "messages": message,
             "user": session_key,
             "stream": stream,
         }
