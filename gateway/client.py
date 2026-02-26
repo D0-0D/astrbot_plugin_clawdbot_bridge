@@ -76,6 +76,7 @@ class OpenClawClient:
         headers_bearer["Authorization"] = f"Bearer {normalized_token}"
         headers_bearer["x-openclaw-auth-token"] = normalized_token
         headers_bearer["x-api-key"] = normalized_token
+        headers_bearer["x-openclaw-gateway-token"] = normalized_token
         variants.append(("bearer", headers_bearer))
 
         if raw_token != normalized_token:
@@ -83,12 +84,14 @@ class OpenClawClient:
             headers_raw_auth["Authorization"] = raw_token
             headers_raw_auth["x-openclaw-auth-token"] = normalized_token
             headers_raw_auth["x-api-key"] = normalized_token
+            headers_raw_auth["x-openclaw-gateway-token"] = normalized_token
             variants.append(("raw-authorization", headers_raw_auth))
 
         headers_token_only = dict(base_headers)
         headers_token_only.pop("Authorization", None)
         headers_token_only["x-openclaw-auth-token"] = normalized_token
         headers_token_only["x-api-key"] = normalized_token
+        headers_token_only["x-openclaw-gateway-token"] = normalized_token
         variants.append(("token-headers-only", headers_token_only))
 
         return variants
@@ -173,14 +176,15 @@ class OpenClawClient:
     def _build_auth_failure_message(self, error_text: str) -> str:
         """构建统一的认证失败提示"""
         token_status = "已配置" if self.auth_token else "未配置"
+        token_length = len(self._normalize_bearer_token(self.auth_token)) if self.auth_token else 0
         detail = f"，网关返回: {error_text[:120]}" if error_text else ""
         logger.error(
             f"[OpenClawClient] 认证失败 (token={token_status}) - {error_text[:200]}"
         )
         return (
             "❌ Gateway 认证失败（401）\n"
-            f"- 当前 token: {token_status}\n"
-            "- 已自动尝试 Bearer / 原始 Authorization / x-api-key 兼容方案\n"
+            f"- 当前 token: {token_status}（长度: {token_length}）\n"
+            "- 已自动尝试 Bearer / 原始 Authorization / x-api-key / x-openclaw-gateway-token 兼容方案\n"
             "- 请确认 gateway_auth_token 与网关 gateway.auth.token 完全一致\n"
             "- 如 AstrBot 在 Docker 中，确认读取的是容器内最新插件配置"
             f"{detail}"

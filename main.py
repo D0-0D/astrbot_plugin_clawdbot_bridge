@@ -6,6 +6,7 @@ AstrBot ↔ OpenClaw 桥接插件
 """
 
 import sys
+import re
 
 from astrbot.api import logger
 from astrbot.api.all import *
@@ -24,6 +25,7 @@ DEFAULT_TIMEOUT = 300
 DEFAULT_SWITCH_COMMANDS = ["/clawd", "/管理", "/clawdbot"]
 DEFAULT_EXIT_COMMANDS = ["/exit", "/退出", "/返回"]
 DEFAULT_SESSION = "main"
+MESSAGE_HANDLER_PRIORITY = -sys.maxsize
 
 
 @register(
@@ -134,6 +136,25 @@ class ClawdbotBridge(Star):
             f"- exit_commands: {exit_commands}"
         )
 
+    @staticmethod
+    def _normalize_message(raw_message: str) -> str:
+        """净化消息文本，避免 QQ 平台附加内容影响 slash 命令识别"""
+        text = (raw_message or "").replace("\u3000", " ")
+        text = text.replace("／", "/")
+        text = re.sub(r"[\u200b-\u200f\u2060\ufeff]", "", text)
+        text = text.strip()
+
+        # 清理常见的前置提及标记（OneBot CQ码 / @昵称）
+        while True:
+            previous = text
+            text = re.sub(r"^\[CQ:at,[^\]]+\]\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"^@[^\s]+\s*", "", text)
+            text = text.strip()
+            if text == previous:
+                break
+
+        return text
+
     async def _build_init_check_text(
         self, session_id: str, is_in_clawdbot: bool
     ) -> str:
@@ -241,19 +262,25 @@ class ClawdbotBridge(Star):
             event.set_result(result)
             yield result
 
-    @filter.event_message_type(EventMessageType.ALL, priority=sys.maxsize)
+    @filter.event_message_type(EventMessageType.ALL, priority=MESSAGE_HANDLER_PRIORITY)
     async def handle_message(self, event: AstrMessageEvent, *args, **kwargs):
         """处理所有消息"""
-        raw_message = event.message_str.strip()
+        raw_message = (event.message_str or "").strip()
+        message = self._normalize_message(raw_message)
+
+        if message != raw_message:
+            logger.debug(
+                f"[clawdbot_bridge] 消息净化: raw={raw_message!r} -> clean={message!r}"
+            )
+
         logger.info(
-            f"[clawdbot_bridge] 收到消息: '{raw_message[:100]}' from sender_id={event.get_sender_id()}"
+            f"[clawdbot_bridge] 收到消息: '{message[:100]}' from sender_id={event.get_sender_id()}"
         )
 
         # 检查管理员权限
         if not self._is_admin(event):
             return
 
-        message = raw_message
         session_id = self.session_manager.get_session_id(event)
         is_in_clawdbot = self.session_manager.is_in_clawdbot_mode(session_id)
 

@@ -80,6 +80,10 @@ docker restart astrbot
 
 之后发送的所有消息都会转发给 OpenClaw，直到退出。
 
+> 说明：在 OpenClaw 模式中，插件会优先拦截并转发 `/xxx` 斜杠命令到 OpenClaw（如 `/session`、`/status` 等），避免被 AstrBot 内置命令抢先处理。
+>
+> 说明：插件会在转发前自动净化 QQ 文本（如移除前置 `@` / `CQ:at`、全角斜杠、零宽字符），以提升 `/xxx` 命令识别稳定性。
+
 ### 会话管理
 
 OpenClaw 支持多个独立的对话会话，每个会话有独立的上下文：
